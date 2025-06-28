@@ -1,0 +1,57 @@
+
+services:
+  authenicator:
+    build:
+      context: authentication-cms
+    container_name: authenicator
+    restart: always
+    depends_on:
+      - controller-db
+      - system-a-db
+      - system-b-db
+    env_file:
+      - authentication-cms/.env
+
+  controller-db:
+    image: postgres:16
+    container_name: controller-db
+    restart: always
+    environment:
+      POSTGRES_DB: controller
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+    ports:
+      - "5433:5432"
+    volumes:
+      - controller_data:/var/lib/postgresql/data
+
+  system-a-db:
+    image: postgres:16
+    container_name: system-a-db
+    restart: always
+    environment:
+      POSTGRES_DB: system_a
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+    ports:
+      - "5434:5432"
+    volumes:
+      - system_a_data:/var/lib/postgresql/data
+
+  system-b-db:
+    image: postgres:16
+    container_name: system-b-db
+    restart: always
+    environment:
+      POSTGRES_DB: system_b
+      POSTGRES_USER: appuser
+      POSTGRES_PASSWORD: apppass
+    ports:
+      - "5435:5432"
+    volumes:
+      - system_b_data:/var/lib/postgresql/data
+
+volumes:
+  controller_data:
+  system_a_data:
+  system_b_data:

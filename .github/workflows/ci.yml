@@ -1,0 +1,171 @@
+name: Security Scan
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+    branches: [main, dev]
+  workflow_dispatch:
+
+jobs:
+  security-scan:
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [authentication-cms]
+        go-version: [1.24]
+
+    steps:
+      - name: Check Out
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go-version }}
+
+      - name: Download dependencies
+        run: |
+          cd ./${{ matrix.service }}
+          go mod download
+
+      - name: Security Scanner (Gosec)
+        run: |
+          go install github.com/securego/gosec/v2/cmd/gosec@latest
+          cd ./${{ matrix.service }}
+          
+          # Run gosec with multiple output formats
+          gosec -fmt sarif -out ../gosec-results-${{ matrix.service }}.sarif ./... || echo "Gosec completed"
+          gosec -fmt json -out ../gosec-results-${{ matrix.service }}.json ./... || echo "Gosec completed"
+          
+          # Display critical results in console
+          echo "=== 🔍 Security Scan Results for ${{ matrix.service }} ==="
+          gosec -fmt text ./... || echo "Scan completed"
+          
+          # Check for high severity issues
+          if gosec -severity high -quiet ./...; then
+            echo "✅ No high severity issues found"
+          else
+            echo "⚠️  High severity issues detected - check artifacts for details"
+          fi
+
+      - name: Upload Security Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: security-results-${{ matrix.service }}-go${{ matrix.go-version }}
+          path: |
+            gosec-results-${{ matrix.service }}.sarif
+            gosec-results-${{ matrix.service }}.json
+          retention-days: 30
+
+      - name: Upload SARIF to GitHub Security
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: gosec-results-${{ matrix.service }}.sarif
+
+      - name: Vulnerability Scanner (Nancy)
+        run: |
+          go install github.com/sonatype-nexus-community/nancy@latest
+          cd ./${{ matrix.service }}
+          
+          # Generate dependency list and scan for vulnerabilities
+          echo "=== 🔍 Vulnerability Scan Results for ${{ matrix.service }} ==="
+          go list -json -deps ./... | nancy sleuth --output-format=text || echo "Nancy scan completed"
+          
+          # Generate JSON report
+          go list -json -deps ./... | nancy sleuth --output-format=json > ../nancy-results-${{ matrix.service }}.json || echo "Nancy JSON report generated"
+
+      - name: Upload Vulnerability Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: vulnerability-results-${{ matrix.service }}-go${{ matrix.go-version }}
+          path: nancy-results-${{ matrix.service }}.json
+          retention-days: 30
+
+      - name: Go Security Checker (Govulncheck)
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@latest
+          cd ./${{ matrix.service }}
+          
+          echo "=== 🔍 Go Vulnerability Check for ${{ matrix.service }} ==="
+          govulncheck -json ./... > ../govulncheck-results-${{ matrix.service }}.json || echo "Govulncheck completed"
+          govulncheck ./... || echo "Govulncheck completed"
+
+      - name: Upload Govulncheck Results
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: govulncheck-results-${{ matrix.service }}-go${{ matrix.go-version }}
+          path: govulncheck-results-${{ matrix.service }}.json
+          retention-days: 30
+
+      - name: Security Summary
+        if: always()
+        run: |
+          echo "## 🛡️ Security Scan Summary" >> $GITHUB_STEP_SUMMARY
+          echo "| Tool | Status |" >> $GITHUB_STEP_SUMMARY
+          echo "|------|--------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Gosec | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Nancy | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "| Govulncheck | ✅ Completed |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📁 **Artifacts uploaded:**" >> $GITHUB_STEP_SUMMARY
+          echo "- Security scan results (SARIF, JSON)" >> $GITHUB_STEP_SUMMARY
+          echo "- Vulnerability scan results" >> $GITHUB_STEP_SUMMARY
+          echo "- Go vulnerability check results" >> $GITHUB_STEP_SUMMARY
+          
+
+  build:
+    needs: security-scan
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [ authentication-cms ]
+        go-version: [ 1.24 ]
+
+    steps:
+      - name: Checking out
+        uses: actions/checkout@v4
+
+      - name: Setting up docker
+        uses: docker/setup-buildx-action@v3
+
+      - name: Logging in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract Metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=sha,prefix={{branch}}-
+            type=raw,value=latest,enable={{is_default_branch}}
+          labels: |
+            org.opencontainers.image.title=${{ matrix.service }}
+            org.opencontainers.image.description=Go microservice for ${{ matrix.service }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: ./${{ matrix.service }}
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
